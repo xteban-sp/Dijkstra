@@ -17,6 +17,7 @@ let dragNode=null, dragDX=0, dragDY=0, dragged=false, dragSnapshot=null;
 let hoverTarget=null;
 let selected=null;        // {type:'node'|'edge', id}
 let guides=[];
+let calcDir="from";       // 'from' = desde un origen · 'to' = hacia un destino
 
 /* ---------- utilidades ---------- */
 function toast(msg){const t=document.getElementById("toast");t.textContent=msg;t.classList.add("show");clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove("show"),1800);}
@@ -186,7 +187,7 @@ function openMenu(x,y,t){
 function menuAction(a,t){
   if(t.type==="node"){
     if(a==="src"){document.getElementById("srcSel").value=String(t.id);toast("Origen: nodo "+nodeById(t.id).label);}
-    else if(a==="dst"){document.getElementById("dstSel").value=String(t.id);if(state.result){render();showResult();}toast("Destino: nodo "+nodeById(t.id).label);}
+    else if(a==="dst"){document.getElementById("dstSel").value=String(t.id);if(state.result&&state.result.mode==="from"){render();showResult();}toast("Destino: nodo "+nodeById(t.id).label);}
     else if(a==="del")deleteNode(t.id);
   }else{
     const ed=state.edges.find(x=>x.id===t.id);if(!ed)return;
@@ -209,26 +210,110 @@ function edgeGeom(e){
   const mx=(x1+x2)/2+nx*off,my=(y1+y2)/2+ny*off;
   return{x1,y1,x2,y2,mx,my,off,nx,ny};
 }
-function activeTarget(){if(hoverTarget!==null)return hoverTarget;const d=document.getElementById("dstSel").value;return d?+d:null;}
-function isPathEdge(e){
-  const r=state.result;if(!r)return false;const tgt=activeTarget();
-  if(tgt!==null){const seq=pathTo(tgt);if(!seq)return false;
-    for(let i=0;i+1<seq.length;i++){const a=seq[i],b=seq[i+1];if(e.from===a&&e.to===b)return true;if(!state.directed&&e.from===b&&e.to===a)return true;}return false;}
-  if(r.prev[e.to]===e.from)return true;if(!state.directed&&r.prev[e.from]===e.to)return true;return false;
+function activeTarget(){
+  if(hoverTarget!==null)return hoverTarget;
+  if(state.result&&state.result.mode==="from"){const d=document.getElementById("dstSel").value;return d?+d:null;}
+  return null;
+}
+// Resaltado: _relSet = aristas que están en ALGÚN camino origen→destino (azul);
+//            _redSet = aristas del camino más corto (rojo).
+let _relSet=null, _redSet=null;
+function reachable(start,reverse){
+  const seen=new Set([start]),stack=[start];
+  while(stack.length){const u=stack.pop();
+    state.edges.forEach(e=>{let nb=null;
+      if(!reverse){if(e.from===u)nb=e.to;else if(!state.directed&&e.to===u)nb=e.from;}
+      else{if(e.to===u)nb=e.from;else if(!state.directed&&e.from===u)nb=e.to;}
+      if(nb!==null&&!seen.has(nb)){seen.add(nb);stack.push(nb);}});}
+  return seen;
+}
+function edgeSetFromSeq(seq){const s=new Set();if(!seq)return s;
+  for(let i=0;i+1<seq.length;i++){const a=seq[i],b=seq[i+1];
+    const e=findEdge(a,b)||(!state.directed?findEdge(b,a):null);if(e)s.add(e.id);}
+  return s;}
+// todas las aristas que participan en algún camino de A a B
+function relevantEdges(A,B){
+  const fwd=reachable(A,false),back=reachable(B,true),s=new Set();
+  state.edges.forEach(e=>{
+    if(fwd.has(e.from)&&back.has(e.to))s.add(e.id);
+    if(!state.directed&&fwd.has(e.to)&&back.has(e.from))s.add(e.id);});
+  return s;}
+// cuenta cuántos caminos simples (sin repetir nodos) hay de A a B
+function countPaths(A,B){
+  let count=0, steps=0, capped=false; const LIM=400000; const visited=new Set();
+  (function dfs(u){
+    if(capped)return;
+    if(++steps>LIM){capped=true;return;}
+    if(u===B){count++;return;}
+    visited.add(u);
+    for(const e of state.edges){
+      let nb=null;
+      if(e.from===u)nb=e.to;else if(!state.directed&&e.to===u)nb=e.from;
+      if(nb!==null&&!visited.has(nb)){dfs(nb);if(capped)break;}
+    }
+    visited.delete(u);
+  })(A);
+  return {count,capped};
+}
+// enumera caminos simples de A a B y devuelve los K de menor costo, ordenados
+function kShortestPaths(A,B,K){
+  const found=[]; let steps=0,capped=false; const STEPLIM=300000, MAXFOUND=5000;
+  const visited=new Set(), seq=[];
+  (function dfs(u,cost){
+    if(capped)return;
+    if(++steps>STEPLIM){capped=true;return;}
+    visited.add(u);seq.push(u);
+    if(u===B){found.push({cost,seq:seq.slice()});}
+    else{
+      for(const e of state.edges){
+        let nb=null,w=0;
+        if(e.from===u){nb=e.to;w=e.w;}else if(!state.directed&&e.to===u){nb=e.from;w=e.w;}
+        if(nb!==null&&!visited.has(nb)){dfs(nb,cost+w);if(capped||found.length>=MAXFOUND)break;}
+      }
+    }
+    seq.pop();visited.delete(u);
+  })(A,0);
+  found.sort((p,q)=>p.cost-q.cost);
+  return {list:found.slice(0,K), total:found.length, capped:capped||found.length>=MAXFOUND};
+}
+// árbol de caminos mínimos (cuando no hay destino enfocado)
+function sptEdgeSet(){const s=new Set(),r=state.result;if(!r)return s;
+  state.edges.forEach(e=>{
+    if(r.mode==="from"){if(r.link[e.to]===e.from||(!state.directed&&r.link[e.from]===e.to))s.add(e.id);}
+    else{if(r.link[e.from]===e.to||(!state.directed&&r.link[e.to]===e.from))s.add(e.id);}});
+  return s;}
+function computeHighlight(){
+  _relSet=null;_redSet=null;
+  const r=state.result;if(!r)return;
+  const tgt=activeTarget();
+  if(tgt!==null&&tgt!==r.anchor&&r.dist[tgt]<Infinity){
+    _redSet=edgeSetFromSeq(pathTo(tgt));
+    const A=r.mode==="from"?r.anchor:tgt, B=r.mode==="from"?tgt:r.anchor;
+    _relSet=relevantEdges(A,B);     // todos los caminos origen→destino
+  }else{
+    _relSet=sptEdgeSet();           // sin destino: todo el árbol de caminos mínimos
+  }
+}
+// 0 = nada · 1 = parte de los caminos origen→destino (azul) · 2 = camino más corto (rojo)
+function edgeLevel(e){
+  if(_redSet&&_redSet.has(e.id))return 2;
+  if(_relSet&&_relSet.has(e.id))return 1;
+  return 0;
 }
 function pathNodeSet(){const tgt=activeTarget();if(state.result===null||tgt===null)return null;const seq=pathTo(tgt);return seq?new Set(seq):null;}
 function render(){
   gGuides.innerHTML="";gEdges.innerHTML="";gNodes.innerHTML="";
+  computeHighlight();
   guides.forEach(g=>{const l=document.createElementNS(SVG_NS,"line");
     if(g.type==="v"){l.setAttribute("x1",g.v);l.setAttribute("y1",-100000);l.setAttribute("x2",g.v);l.setAttribute("y2",100000);}
     else{l.setAttribute("x1",-100000);l.setAttribute("y1",g.v);l.setAttribute("x2",100000);l.setAttribute("y2",g.v);}
     l.setAttribute("class","guide");gGuides.appendChild(l);});
   state.edges.forEach(e=>{
-    const g=edgeGeom(e),hi=isPathEdge(e),sel=selected&&selected.type==="edge"&&selected.id===e.id;
+    const g=edgeGeom(e),lvl=edgeLevel(e),sel=selected&&selected.type==="edge"&&selected.id===e.id;
     const path=document.createElementNS(SVG_NS,"path");
     path.setAttribute("d",g.off?`M ${g.x1} ${g.y1} Q ${g.mx+g.nx*14} ${g.my+g.ny*14} ${g.x2} ${g.y2}`:`M ${g.x1} ${g.y1} L ${g.x2} ${g.y2}`);
-    path.setAttribute("fill","none");path.setAttribute("class","edge-line"+(hi?" hi":"")+(sel?" sel":""));path.setAttribute("data-edge",e.id);
-    if(state.directed)path.setAttribute("marker-end",hi?"url(#arrowHi)":"url(#arrow)");
+    path.setAttribute("fill","none");path.setAttribute("class","edge-line"+(lvl===2?" hi":lvl===1?" tree":"")+(sel?" sel":""));path.setAttribute("data-edge",e.id);
+    if(state.directed)path.setAttribute("marker-end",lvl===2?"url(#arrowHi)":lvl===1?"url(#arrowTree)":"url(#arrow)");
     path.style.cursor="pointer";gEdges.appendChild(path);
     const t=document.createElementNS(SVG_NS,"text");
     t.setAttribute("x",g.off?(g.mx+g.nx*22):(g.x1+g.x2)/2);t.setAttribute("y",(g.off?(g.my+g.ny*22):(g.y1+g.y2)/2)-4);
@@ -240,9 +325,9 @@ function render(){
     g.style.cursor=mode==="move"?"grab":(mode==="delete"?"pointer":"crosshair");
     const c=document.createElementNS(SVG_NS,"circle");c.setAttribute("cx",n.x);c.setAttribute("cy",n.y);c.setAttribute("r",R);
     let cls="node-c";
-    if(r){if(n.id===r.src)cls+=" src";else if(r.dist[n.id]<Infinity)cls+=" done";}
-    if(pset&&pset.has(n.id)&&n.id!==(r&&r.src))cls+=" onpath";
-    if(tgt!==null&&n.id===tgt&&n.id!==(r&&r.src))cls+=" dest";
+    if(r){if(n.id===r.anchor)cls+=" src";else if(r.dist[n.id]<Infinity)cls+=" done";}
+    if(pset&&pset.has(n.id)&&n.id!==(r&&r.anchor))cls+=" onpath";
+    if(tgt!==null&&n.id===tgt&&n.id!==(r&&r.anchor))cls+=" dest";
     if(selected&&selected.type==="node"&&selected.id===n.id)cls+=" sel";
     if(edgeStart===n.id)cls+=" pick";
     c.setAttribute("class",cls);c.setAttribute("data-node",n.id);g.appendChild(c);
@@ -256,7 +341,7 @@ function render(){
 /* ---------- selectores ---------- */
 function refreshSrc(){
   const sel=document.getElementById("srcSel"),cur=sel.value,dst=document.getElementById("dstSel"),curD=dst.value;
-  sel.innerHTML='<option value="">Selecciona…</option>';dst.innerHTML='<option value="">Todos los nodos</option>';
+  sel.innerHTML='<option value="">Selecciona…</option>';dst.innerHTML='<option value="">'+(calcDir==="to"?"Selecciona…":"Todos los nodos")+'</option>';
   state.nodes.forEach(n=>{
     const o=document.createElement("option");o.value=n.id;o.textContent="Nodo "+n.label;sel.appendChild(o);
     const o2=document.createElement("option");o2.value=n.id;o2.textContent="Nodo "+n.label;dst.appendChild(o2);
@@ -264,43 +349,118 @@ function refreshSrc(){
   if(state.nodes.some(n=>String(n.id)===cur))sel.value=cur;
   if(state.nodes.some(n=>String(n.id)===curD))dst.value=curD;
 }
-document.getElementById("dstSel").addEventListener("change",()=>{if(state.result){render();showResult();}});
+document.getElementById("dstSel").addEventListener("change",()=>{if(state.result&&state.result.mode==="from"){render();showResult();}});
 
 /* ---------- Dijkstra ---------- */
-function dijkstra(srcId){
-  const dist={},prev={},visited={},order=[];
-  state.nodes.forEach(n=>{dist[n.id]=Infinity;prev[n.id]=null;});dist[srcId]=0;
+// Desde un origen hacia todos: link[x] = nodo anterior en la ruta origen→x
+function dijkstraFrom(srcId){
+  const dist={},link={},visited={},order=[];
+  state.nodes.forEach(n=>{dist[n.id]=Infinity;link[n.id]=null;});dist[srcId]=0;
   const ids=state.nodes.map(n=>n.id);
   while(true){
     let u=null,best=Infinity;for(const id of ids){if(!visited[id]&&dist[id]<best){best=dist[id];u=id;}}
     if(u===null)break;visited[u]=true;order.push(u);
     state.edges.forEach(e=>{let nb=null;if(e.from===u)nb=e.to;else if(!state.directed&&e.to===u)nb=e.from;
-      if(nb!==null&&!visited[nb]&&dist[u]+e.w<dist[nb]){dist[nb]=dist[u]+e.w;prev[nb]=u;}});
+      if(nb!==null&&!visited[nb]&&dist[u]+e.w<dist[nb]){dist[nb]=dist[u]+e.w;link[nb]=u;}});
   }
-  return{src:srcId,dist,prev,order};
+  return{mode:"from",anchor:srcId,dist,link,order};
 }
-function pathTo(target){const r=state.result;if(!r||r.dist[target]===Infinity)return null;const seq=[];let cur=target;while(cur!==null){seq.unshift(cur);cur=r.prev[cur];}return seq;}
+// Desde todos hacia un destino (Dijkstra sobre el grafo invertido):
+// link[x] = siguiente nodo en la ruta x→destino
+function dijkstraTo(dstId){
+  const dist={},link={},visited={},order=[];
+  state.nodes.forEach(n=>{dist[n.id]=Infinity;link[n.id]=null;});dist[dstId]=0;
+  const ids=state.nodes.map(n=>n.id);
+  while(true){
+    let u=null,best=Infinity;for(const id of ids){if(!visited[id]&&dist[id]<best){best=dist[id];u=id;}}
+    if(u===null)break;visited[u]=true;order.push(u);
+    state.edges.forEach(e=>{let nb=null;if(e.to===u)nb=e.from;else if(!state.directed&&e.from===u)nb=e.to;
+      if(nb!==null&&!visited[nb]&&dist[u]+e.w<dist[nb]){dist[nb]=dist[u]+e.w;link[nb]=u;}});
+  }
+  return{mode:"to",anchor:dstId,dist,link,order};
+}
+function pathTo(node){
+  const r=state.result;if(!r||r.dist[node]===Infinity)return null;
+  const seq=[];let cur=node;
+  if(r.mode==="from"){while(cur!==null){seq.unshift(cur);cur=r.link[cur];}}   // origen…node
+  else{while(cur!==null){seq.push(cur);cur=r.link[cur];}}                      // node…destino
+  return seq;
+}
 function clearResult(){state.result=null;document.getElementById("resultBox").innerHTML='<div class="placeholder">Elige un origen y pulsa <b>Calcular</b> para ver las distancias mínimas y resaltar las rutas.</div>';}
 
 document.getElementById("runBtn").onclick=()=>{
-  const sel=document.getElementById("srcSel");
-  if(!sel.value){toast("Elige primero el nodo origen");sel.focus();return;}
   if(!state.nodes.length){toast("El grafo está vacío");return;}
-  state.result=dijkstra(+sel.value);render();showResult();
+  if(calcDir==="from"){
+    const sel=document.getElementById("srcSel");
+    if(!sel.value){toast("Elige primero el nodo origen");sel.focus();return;}
+    state.result=dijkstraFrom(+sel.value);
+  }else{
+    const dst=document.getElementById("dstSel");
+    if(!dst.value){toast("Elige primero el nodo destino");dst.focus();return;}
+    state.result=dijkstraTo(+dst.value);
+  }
+  render();showResult();
+  // aviso si el nodo enfocado no tiene camino
+  if(calcDir==="from"){
+    const dv=document.getElementById("dstSel").value;
+    if(dv&&state.result.dist[+dv]===Infinity) toast("No hay camino al nodo "+nodeById(+dv).label);
+  }else{
+    if(state.nodes.some(n=>state.result.dist[n.id]===Infinity)) toast("Algunos nodos no tienen camino al destino");
+  }
 };
 document.getElementById("resetBtn").onclick=()=>{clearResult();render();};
 
 function showResult(){
   const r=state.result;if(!r)return;const box=document.getElementById("resultBox");
-  const srcLabel=nodeById(r.src).label;const dstVal=document.getElementById("dstSel").value;
+  const anchorLabel=nodeById(r.anchor).label;
+  const hiVal=r.mode==="from"?document.getElementById("dstSel").value:"";
+  const rutaCol=r.mode==="from"?("Ruta desde "+anchorLabel):("Ruta hacia "+anchorLabel);
+
+  // intro explicativa según el modo
+  const intro=r.mode==="from"
+    ? `<div class="explain">Distancia mínima y ruta más corta <b>desde el nodo ${anchorLabel}</b> hacia cada nodo del grafo. Una casilla con <b>∞</b> significa que ese nodo no es alcanzable.</div>`
+    : `<div class="explain">Distancia mínima y ruta más corta <b>desde cada nodo hacia el nodo ${anchorLabel}</b>. Una casilla con <b>∞</b> significa que ese nodo no puede llegar al destino.</div>`;
+
+  // recuadro destacado del destino elegido (modo origen)
+  let focus="";
+  if(hiVal){
+    const dv=+hiVal, hl=nodeById(dv).label, dd=r.dist[dv];
+    if(dd===Infinity){
+      focus=`<div class="notice">No existe ningún camino del nodo <b>${anchorLabel}</b> al nodo <b>${hl}</b>. El destino no es alcanzable.</div>`;
+    }else{
+      const cp=countPaths(r.anchor,dv);
+      const nTxt=cp.capped?("más de "+cp.count):cp.count;
+      const plural=(cp.count===1&&!cp.capped)?"camino posible":"caminos posibles";
+      const ks=kShortestPaths(r.anchor,dv,4);
+      const listHtml=ks.list.map((p,i)=>{
+        const seqTxt=p.seq.map(id=>nodeById(id).label).join(" → ");
+        return `<div class="pl${i===0?' best':''}"><span class="n">${i+1}.</span><span class="seq">${seqTxt}</span><span class="c">${p.cost}</span></div>`;
+      }).join("");
+      const remaining=cp.capped?"muchas":(cp.count-ks.list.length);
+      const moreTxt=(cp.capped||cp.count>ks.list.length)?`<div class="meta" style="margin-top:5px">… y ${remaining} ruta(s) más.</div>`:"";
+      focus=`<div class="okline">
+        <div>Del nodo <b>${anchorLabel}</b> al nodo <b>${hl}</b> existen <b>${nTxt}</b> ${plural}. El más corto cuesta <b>${dd}</b>.</div>
+        <div style="margin-top:6px;font-weight:600">Rutas ordenadas de menor a mayor costo:</div>
+        <div class="pathlist">${listHtml}</div>${moreTxt}
+        <div class="legend-mini">
+          <span><i style="background:var(--edge-hi)"></i>más corta (en rojo en el grafo)</span>
+          <span><i style="background:var(--accent)"></i>otras rutas</span>
+        </div>
+      </div>`;
+    }
+  }
+
   let rows="";
   state.nodes.slice().sort((a,b)=>a.label.localeCompare(b.label,undefined,{numeric:true})).forEach(n=>{
-    const d=r.dist[n.id],seq=pathTo(n.id),pth=seq?seq.map(id=>nodeById(id).label).join(" → "):"—";
-    const tcls=dstVal&&String(n.id)===dstVal?' class="target"':'';
+    const d=r.dist[n.id],seq=pathTo(n.id);
+    const pth=seq?seq.map(id=>nodeById(id).label).join(" → "):'<span style="color:var(--danger)">sin camino</span>';
+    const tcls=hiVal&&String(n.id)===hiVal?' class="target"':'';
     rows+=`<tr${tcls}><td>${n.label}</td><td class="dist${d===Infinity?' inf':''}">${d===Infinity?"∞":d}</td><td style="color:var(--muted)">${pth}</td></tr>`;
   });
-  box.innerHTML=`<table><thead><tr><th>Nodo</th><th>Dist.</th><th>Ruta desde ${srcLabel}</th></tr></thead><tbody>${rows}</tbody></table>
-    <div class="meta">Orden de visita: ${r.order.map(id=>nodeById(id).label).join(" · ")}</div>`;
+  const unreachable=state.nodes.filter(n=>r.dist[n.id]===Infinity).length;
+  const foot=unreachable?`<div class="meta">${unreachable} nodo(s) con ∞: sin camino ${r.mode==="from"?"desde":"hacia"} el nodo ${anchorLabel}.</div>`:"";
+  box.innerHTML=`${intro}${focus}<table><thead><tr><th>Nodo</th><th>Dist.</th><th>${rutaCol}</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="meta">Orden en que el algoritmo fijó los nodos: ${r.order.map(id=>nodeById(id).label).join(" · ")}.</div>${foot}`;
 }
 
 /* ---------- ejemplos ---------- */
@@ -393,6 +553,19 @@ const helpPop=document.getElementById("helpPop");
 document.getElementById("helpBtn").onclick=e=>{e.stopPropagation();helpPop.style.display=helpPop.style.display==="block"?"none":"block";};
 document.addEventListener("mousedown",e=>{if(!helpPop.contains(e.target)&&e.target.id!=="helpBtn"&&!e.target.closest("#helpBtn"))helpPop.style.display="none";});
 
+/* ---------- dirección del cálculo (desde origen / hacia destino) ---------- */
+function updateCalcUI(){
+  document.querySelectorAll("#calcDir button").forEach(x=>x.classList.toggle("on",x.dataset.calc===calcDir));
+  document.getElementById("srcField").style.display=calcDir==="to"?"none":"block";
+  document.getElementById("dstLbl").innerHTML=calcDir==="to"
+    ? "Nodo de destino"
+    : 'Nodo de destino <span style="opacity:.7">(opcional)</span>';
+  refreshSrc();
+}
+document.querySelectorAll("#calcDir button").forEach(b=>{
+  b.onclick=()=>{if(b.dataset.calc===calcDir)return;calcDir=b.dataset.calc;clearResult();updateCalcUI();render();};
+});
+
 /* ---------- panel redimensionable ---------- */
 const resizer=document.getElementById("resizer"),sidebar=document.getElementById("sidebar");
 let resizing=false;
@@ -415,4 +588,4 @@ document.addEventListener("keydown",e=>{
 
 /* ---------- init ---------- */
 window.addEventListener("resize",()=>render());
-clearResult();render();refreshSrc();updateStatus();
+clearResult();render();updateCalcUI();updateStatus();

@@ -23,9 +23,13 @@
     <aside class="sidebar" id="sidebar">
       <div class="sec">
         <h3 class="sec-h">Calcular ruta</h3>
-        <div class="field"><label class="lbl">Nodo de origen</label>
+        <div class="switch fill" id="calcDir" style="margin-bottom:12px">
+          <button class="on" data-calc="from">Desde origen</button>
+          <button data-calc="to">Hacia destino</button>
+        </div>
+        <div class="field" id="srcField"><label class="lbl" id="srcLbl">Nodo de origen</label>
           <select id="srcSel"><option value="">Selecciona…</option></select></div>
-        <div class="field"><label class="lbl">Nodo de destino <span style="opacity:.7">(opcional)</span></label>
+        <div class="field" id="dstField"><label class="lbl" id="dstLbl">Nodo de destino <span style="opacity:.7">(opcional)</span></label>
           <select id="dstSel"><option value="">Todos los nodos</option></select></div>
         <div class="btns">
           <button class="btn primary" id="runBtn">Calcular Dijkstra</button>
@@ -108,6 +112,8 @@
             <path d="M0,0 L10,5 L0,10 z" fill="var(--edge)"/></marker>
           <marker id="arrowHi" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M0,0 L10,5 L0,10 z" fill="var(--edge-hi)"/></marker>
+          <marker id="arrowTree" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
         </defs>
         <g id="viewport">
           <g id="gGuides"></g>
